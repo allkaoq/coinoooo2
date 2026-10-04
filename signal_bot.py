@@ -305,11 +305,12 @@ def fmt(x):
 
 def send(text):
     if not TG_TOKEN or not TG_CHAT_ID:
-        print("텔레그램 설정(TG_TOKEN, TG_CHAT_ID)이 없습니다.\n" + text)
-        return
+        sys.exit("오류: TG_TOKEN / TG_CHAT_ID 비밀값이 없습니다. "
+                 "저장소 Settings → Secrets and variables → Actions 에서 이름과 값을 확인하세요.")
     r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                       data={"chat_id": TG_CHAT_ID, "text": text}, timeout=15)
-    r.raise_for_status()
+    if r.status_code != 200:
+        raise RuntimeError(f"텔레그램 전송 실패 {r.status_code}: {r.text}")
 
 
 def main():
@@ -318,8 +319,10 @@ def main():
         with open(STATE_FILE, encoding="utf-8") as f:
             state = json.load(f)
 
-    # 처음 시작할 때 한 번만 테스트 메시지 전송 (state.json에 기록되어 이후엔 보내지 않음)
-    if not state.get("started"):
+    # 처음 시작할 때, 그리고 Actions에서 "Run workflow"로 수동 실행할 때마다 테스트 메시지 전송
+    # (전송에 실패하면 오류로 종료되고 "시작함" 기록도 남기지 않음)
+    manual = os.environ.get("EVENT_NAME") == "workflow_dispatch"
+    if manual or not state.get("started"):
         send("✅ 신호 알림 봇이 시작되었습니다 (테스트 메시지)\n"
              f"코인: {', '.join(f'{kr}({code})' for code, kr in COINS.items())}\n"
              f"인터벌: {', '.join(INTERVALS)}\n"
