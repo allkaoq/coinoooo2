@@ -316,6 +316,14 @@ def main():
         with open(STATE_FILE, encoding="utf-8") as f:
             state = json.load(f)
 
+    # 처음 시작할 때 한 번만 테스트 메시지 전송 (state.json에 기록되어 이후엔 보내지 않음)
+    if not state.get("started"):
+        send("✅ 신호 알림 봇이 시작되었습니다 (테스트 메시지)\n"
+             f"코인: {', '.join(f'{kr}({code})' for code, kr in COINS.items())}\n"
+             f"인터벌: {', '.join(INTERVALS)}\n"
+             "롱/숏 신호가 나오면 이 채팅으로 알림이 옵니다.")
+        state["started"] = 1
+
     try:
         valid = {m["market"] for m in http_get("/market/all", {"isDetails": "false"})}
     except Exception as e:
