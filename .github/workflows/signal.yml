@@ -16,6 +16,7 @@ jobs:
       - run: pip install requests
       - run: python signal_bot.py
         env:
+          EVENT_NAME: ${{ github.event_name }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       - name: save state
