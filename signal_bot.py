@@ -19,6 +19,8 @@ COINS = {
 
 # 인터벌: 업비트는 45분봉을 제공하지 않아서 15분봉 3개를 묶어 45분봉을 만듭니다.
 INTERVALS = {
+    "5분": {"kind": "min", "unit": 5, "sec": 300},
+    "10분": {"kind": "min", "unit": 10, "sec": 600},
     "45분": {"kind": "agg", "unit": 15, "sec": 2700},
     "1시간": {"kind": "min", "unit": 60, "sec": 3600},
     "4시간": {"kind": "min", "unit": 240, "sec": 14400},
@@ -344,7 +346,7 @@ def main():
                     continue
                 last_seen = state.get(key, closed[-2]["t"])
                 an = analyze(closed)
-                for i in range(len(closed) - 3, len(closed)):
+                for i in range(max(1, len(closed) - 6), len(closed)):
                     cur, prev = closed[i], closed[i - 1]
                     if cur["t"] <= last_seen:
                         continue
