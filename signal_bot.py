@@ -322,13 +322,13 @@ def main():
         with open(STATE_FILE, encoding="utf-8") as f:
             state = json.load(f)
 
-    # 처음 시작할 때, 그리고 Actions에서 "Run workflow"로 수동 실행할 때마다 테스트 메시지 전송
+    # 처음 시작할 때, 그리고 Run workflow에서 "테스트 메시지 보내기"를 체크해 실행할 때 테스트 메시지 전송
     # (전송에 실패하면 오류로 종료되고 "시작함" 기록도 남기지 않음)
     now_kst = datetime.now(KST)
     today = now_kst.strftime("%Y-%m-%d")
     state["last_run"] = now_kst.strftime("%m-%d %H:%M KST")  # state.json이 실행마다 갱신되어 '마지막 실행 시각' 확인용
 
-    manual = os.environ.get("EVENT_NAME") == "workflow_dispatch"
+    manual = os.environ.get("SEND_TEST", "").lower() == "true"
     if manual or not state.get("started"):
         send("✅ 신호 알림 봇이 시작되었습니다 (테스트 메시지)\n"
              f"코인: {', '.join(f'{kr}({code})' for code, kr in COINS.items())}\n"
