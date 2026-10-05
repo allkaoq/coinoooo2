@@ -1,21 +1,23 @@
 name: signal-bot
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       test:
-        description: "텔레그램 테스트 메시지 보내기"
+        description: "텔레그램 테스트 메시지만 보내고 끝내기"
         type: boolean
         default: false
+  schedule:
+    - cron: "17 */3 * * *"   # 안전장치: 끊겼을 때 다시 시작
 concurrency:
   group: signal-bot
   cancel-in-progress: false
 permissions:
   contents: write
+  actions: write
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -24,10 +26,15 @@ jobs:
       - run: pip install requests
       - run: python signal_bot.py
         env:
+          LOOP_MINUTES: "340"
+          COMMIT_STATE: "1"
+          CHAIN_NEXT: "1"
           SEND_TEST: ${{ github.event.inputs.test }}
+          GITHUB_TOKEN: ${{ github.token }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       - name: save state
+        if: success() || failure()
         run: |
           git config user.name "bot"
           git config user.email "bot@users.noreply.github.com"
