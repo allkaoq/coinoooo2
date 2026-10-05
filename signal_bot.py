@@ -8,6 +8,11 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+try:
+    import trader   # 자동매매 모듈 (없어도 알림 봇은 동작)
+except Exception as _e:
+    trader = None
+
 # ===================== 설정 (여기만 바꾸세요) =====================
 # 업비트 원화마켓 코인: "코드": "표시 이름"  (코드는 업비트 앱의 'BTC/KRW' 앞부분)
 COINS = {
@@ -43,6 +48,8 @@ VOL_SPIKE_MULT = 1.5     # 거래량 급증 기준 (지표와 동일)
 SCORE_MIN = 4            # 롱/숏 점수가 이 값 이상이면 알림 (최대 8점)
 SCORE_ONLY_ON_CROSS = True   # True: 점수가 4점 미만 -> 4점 이상으로 '올라설 때'만 알림 / False: 4점 이상인 봉마다 알림
 FLOW_LEN = 20            # 체결 흐름 계산 기간 (지표와 동일)
+VERSION = "v-realtime-30s"   # 로그/시작 메시지에 표시: 어떤 버전이 돌고 있는지 확인용
+REALTIME = True          # True: 봉이 마감되기 전에도 30초마다 확인해서 조건이 맞으면 즉시 알림(미확정). False: 봉 마감 후에만 알림
 LOOP_MINUTES = float(os.environ.get("LOOP_MINUTES", "0") or 0)   # 0이면 1회 실행, 양수면 그 시간 동안 1분마다 반복
 POLL_SEC = 30            # 반복 확인 간격(초)
 POLL_OFFSET_SEC = 10     # 매 30초 주기의 10초 지점(:10, :40)에 확인 (봉 마감 직후 빠르게 감지)
@@ -464,7 +471,79 @@ def expected_last_closed(name, now):
     return int((now - CLOSE_BUFFER_SEC) // sec) * sec - sec
 
 
-def scan_once(state, checked, valid):
+def fetch_forming(code, name):
+    """아직 진행 중인(마감 전) 최신 봉을 가볍게 조회. 없으면 None"""
+    cfg = INTERVALS[name]
+    market = f"KRW-{code}"
+    if cfg["kind"] == "day":
+        rows = http_get("/candles/days", {"market": market, "count": 2})
+    elif cfg["kind"] == "min":
+        rows = http_get(f"/candles/minutes/{cfg['unit']}", {"market": market, "count": 2})
+    else:
+        rows = http_get(f"/candles/minutes/{cfg['unit']}", {"market": market, "count": 6})
+    candles = sorted((to_candle(k) for k in rows), key=lambda c: c["t"])
+    if cfg["kind"] == "agg":
+        candles = aggregate(candles, cfg["sec"])
+    if not candles:
+        return None
+    c = candles[-1]
+    return c if c["t"] + cfg["sec"] > time.time() else None
+
+
+def realtime_step(code, kr, name, key, closed, state):
+    """진행 중인 봉 기준으로 신호/점수를 검사해 즉시 알림 (봉당 한 번, 미확정)"""
+    if not closed or len(closed) < 3:
+        return False
+    forming = fetch_forming(code, name)
+    if not forming or forming["t"] <= closed[-1]["t"]:
+        return False
+    cs = closed + [forming]
+    i = len(cs) - 1
+    an = analyze(cs)
+    sent = False
+    sig = check_signal(closed[-1], forming)
+    if sig and REQUIRE_FVG and not fvg_at(an, i, sig["side"] == "롱"):
+        sig = None
+    sc = score_at(an, i)
+    sc_prev = score_at(an, i - 1)
+    bar = "━━━━━━━━━━━━━━"
+    note = "※ 봉 마감 전 신호라 사라질 수 있습니다. 마감 후 확정/취소 여부를 다시 알려드립니다."
+    if sig and state.get(f"rtS_{key}") != f"{forming['t']}:{sig['side']}":
+        icon = "🚀" if sig["side"] == "롱" else "⬇️"
+        reasons, rel = build_reasons(sig["side"], an, i)
+        vol_text = f"\n거래량: {fmt_vol(forming['v'])}" + (f" (평균대비 {rel:.1f}%)" if rel is not None else "")
+        score_text = f"\n점수: 롱 {sc['롱']['score']}/8 · 숏 {sc['숏']['score']}/8" if sc else ""
+        send(f"⚡ 실시간 {icon} {sig['side']} 신호 (미확정) | {kr}({code}) {name}\n{bar}\n"
+             + "\n".join(reasons) + f"\n{bar}\n"
+             f"진입: {fmt(sig['entry'])}원\n"
+             f"손절: {fmt(sig['stop'])}원\n"
+             f"익절: {fmt(sig['target'])}원 (+{sig['reward_pct']:.2f}%)\n"
+             f"RR: 1:{sig['rr']:.1f}\n"
+             f"레버리지: {sig['lev']}x" + vol_text + score_text + f"\n{note}")
+        state[f"rtS_{key}"] = f"{forming['t']}:{sig['side']}"
+        sent = True
+    if sc:
+        for side in ("롱", "숏"):
+            if sig and sig["side"] == side:
+                continue  # 신호 메시지에 점수 포함
+            cur_s = sc[side]["score"]
+            if cur_s < SCORE_MIN:
+                continue
+            if SCORE_ONLY_ON_CROSS and sc_prev and sc_prev[side]["score"] >= SCORE_MIN:
+                continue
+            if state.get(f"rtC_{key}_{side}") == forming["t"]:
+                continue
+            lines = [f"• {t}" for t, ok in sc[side]["items"] if ok]
+            warn = f"\n{sc[side]['warn_text']}" if sc[side]["warn"] else ""
+            send(f"⚡ 실시간 📊 {side} 점수 {cur_s}/8 ({grade(cur_s)}) (미확정) | {kr}({code}) {name}\n"
+                 f"현재가: {fmt(forming['c'])}원\n" + "\n".join(lines) + warn +
+                 "\n(진입 신호가 아닌 점수 알림입니다 · 봉 마감 전이라 바뀔 수 있습니다)")
+            state[f"rtC_{key}_{side}"] = forming["t"]
+            sent = True
+    return sent
+
+
+def scan_once(state, checked, valid, hist):
     """모든 코인/인터벌을 한 번 검사. 알림을 보냈으면 True"""
     sent_any = False
     now = time.time()
@@ -478,11 +557,20 @@ def scan_once(state, checked, valid):
             key = f"{code}_{name}"
             expected = expected_last_closed(name, now)
             if checked.get(key, 0) >= expected:
-                continue  # 새 봉이 마감될 시간이 아직 안 됨 -> 요청 생략
+                # 새 봉이 마감될 시간이 아직 안 됨 -> 마감 봉 조회는 생략하고, 진행 중인 봉만 가볍게 확인
+                if REALTIME and key in hist:
+                    try:
+                        sent_any = realtime_step(code, kr, name, key, hist[key], state) or sent_any
+                    except SystemExit:
+                        raise
+                    except Exception as e:
+                        print(f"{key} 실시간 확인 오류: {e}", file=sys.stderr)
+                continue
             try:
                 closed = fetch_closed(code, name)
                 if len(closed) < 3:
                     continue
+                hist[key] = closed
                 last_seen = state.get(key, closed[-2]["t"])
                 an = analyze(closed)
                 for i in range(max(1, len(closed) - 6), len(closed)):
@@ -494,13 +582,20 @@ def scan_once(state, checked, valid):
                         sig = None
                     sc = score_at(an, i)
                     sc_prev = score_at(an, i - 1)
+                    rt_mark = state.get(f"rtS_{key}", "")
+                    confirmed_rt = bool(sig) and rt_mark == f"{cur['t']}:{sig['side']}"
+                    if rt_mark.startswith(f"{cur['t']}:") and not confirmed_rt:
+                        send(f"❌ 실시간 {rt_mark.split(':')[1]} 신호 취소 | {kr}({code}) {name}\n"
+                             "봉이 마감되면서 신호 조건이 해제되었습니다. 진입하지 마세요.")
+                        sent_any = True
                     if sig:
                         icon = "🚀" if sig["side"] == "롱" else "⬇️"
                         reasons, rel = build_reasons(sig["side"], an, i)
                         vol_text = f"\n거래량: {fmt_vol(cur['v'])}" + (f" (평균대비 {rel:.1f}%)" if rel is not None else "")
                         score_text = f"\n점수: 롱 {sc['롱']['score']}/8 · 숏 {sc['숏']['score']}/8" if sc else ""
                         bar = "━━━━━━━━━━━━━━"
-                        send(f"{icon} {sig['side']} 진입 | {kr}({code}) {name}\n{bar}\n"
+                        send((f"✅ {sig['side']} 신호 확정 (봉 마감 기준) | {kr}({code}) {name}\n{bar}\n" if confirmed_rt
+                              else f"{icon} {sig['side']} 진입 | {kr}({code}) {name}\n{bar}\n")
                              + "\n".join(reasons) + f"\n{bar}\n"
                              f"진입: {fmt(sig['entry'])}원\n"
                              f"손절: {fmt(sig['stop'])}원\n"
@@ -508,6 +603,11 @@ def scan_once(state, checked, valid):
                              f"RR: 1:{sig['rr']:.1f}\n"
                              f"레버리지: {sig['lev']}x" + vol_text + score_text)
                         sent_any = True
+                        # 자동매매: 롱 신호이고, 마감 직후(3분 이내)일 때만 (재시작/지연으로 지난 신호는 매매 안 함)
+                        if trader and trader.enabled() and sig["side"] == "롱" \
+                                and time.time() - (cur["t"] + INTERVALS[name]["sec"]) <= 180:
+                            trader.on_long(code, kr, name, INTERVALS[name]["sec"], sig["entry"], sig["stop"],
+                                           sig["target"], sc["롱"]["score"] if sc else None)
                     if sc:
                         for side in ("롱", "숏"):
                             if sig and sig["side"] == side:
@@ -517,6 +617,8 @@ def scan_once(state, checked, valid):
                                 continue
                             if SCORE_ONLY_ON_CROSS and sc_prev and sc_prev[side]["score"] >= SCORE_MIN:
                                 continue
+                            if state.get(f"rtC_{key}_{side}") == cur["t"]:
+                                continue  # 실시간으로 이미 알린 점수
                             lines = [f"• {t}" for t, ok in sc[side]["items"] if ok]
                             warn = f"\n{sc[side]['warn_text']}" if sc[side]["warn"] else ""
                             send(f"📊 {side} 점수 {cur_s}/8 ({grade(cur_s)}) | {kr}({code}) {name}\n"
@@ -532,6 +634,7 @@ def scan_once(state, checked, valid):
 
 
 def main():
+    print(f"봇 시작: {VERSION} · 실시간={REALTIME} · {POLL_SEC}초마다 확인 · 점수 {SCORE_MIN}점 이상", flush=True)
     state = load_state()
     now_kst = datetime.now(KST)
     today = now_kst.strftime("%Y-%m-%d")
@@ -543,7 +646,9 @@ def main():
         send("✅ 신호 알림 봇이 시작되었습니다 (테스트 메시지)\n"
              f"코인: {', '.join(f'{kr}({code})' for code, kr in COINS.items())}\n"
              f"인터벌: {', '.join(INTERVALS)}\n"
-             f"롱/숏 진입 신호, 점수 {SCORE_MIN}점 이상 알림이 이 채팅으로 옵니다.")
+             f"롱/숏 진입 신호, 점수 {SCORE_MIN}점 이상 알림이 이 채팅으로 옵니다.\n"
+             f"버전: {VERSION} ({POLL_SEC}초마다 확인, 봉 마감 전에도 즉시 알림: {'켜짐' if REALTIME else '꺼짐'})"
+             + (f"\n자동매매 모드: {trader.TRADE_MODE}" if trader and trader.enabled() else ""))
         state["started"] = 1
         state["hb_date"] = today
         if manual:
@@ -555,8 +660,11 @@ def main():
         print(f"마켓 목록 오류: {e}", file=sys.stderr)
         valid = None
 
+    if trader:
+        trader.set_notifier(send)
     deadline = time.time() + LOOP_MINUTES * 60
     checked = {}
+    hist = {}
     last_commit = time.time()
     chain = os.environ.get("CHAIN_NEXT") == "1" and LOOP_MINUTES > 0
     dispatched = False
@@ -568,13 +676,16 @@ def main():
             if HEARTBEAT_HOUR_KST is not None and now_kst.hour >= HEARTBEAT_HOUR_KST and state.get("hb_date") != today:
                 send(f"💓 봇 정상 작동 중 (하루 한 번 알림)\n확인 시각: {state['last_run']}")
                 state["hb_date"] = today
-            sent_any = scan_once(state, checked, valid)
+            sent_any = scan_once(state, checked, valid, hist)
+            if trader and trader.enabled():
+                trader.tick()
         except SystemExit:
             raise
         except Exception as e:
             print(f"반복 오류: {e}", file=sys.stderr)
             sent_any = False
         save_state(state)
+        print(f"[{datetime.now(KST):%H:%M:%S}] 확인 완료 · 알림 {'보냄' if sent_any else '없음'} · {POLL_SEC}초 주기", flush=True)
         if chain and not dispatched and time.time() > deadline - 150:
             dispatch_next()
             dispatched = True
