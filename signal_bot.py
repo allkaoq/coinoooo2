@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -40,6 +41,8 @@ VOL_LOOKBACK = 20        # 거래량 평균 기간 (지표와 동일)
 VOL_SPIKE_MULT = 1.5     # 거래량 급증 기준 (지표와 동일)
 # ===============================================================
 
+HEARTBEAT_HOUR_KST = 9   # 매일 이 시각(한국시간) 이후 첫 실행 때 "작동 중" 알림 1회. 끄려면 None
+KST = timezone(timedelta(hours=9))
 STATE_FILE = "state.json"
 BASE = "https://api.upbit.com/v1"
 TG_TOKEN = os.environ.get("TG_TOKEN", "")
@@ -321,6 +324,10 @@ def main():
 
     # 처음 시작할 때, 그리고 Actions에서 "Run workflow"로 수동 실행할 때마다 테스트 메시지 전송
     # (전송에 실패하면 오류로 종료되고 "시작함" 기록도 남기지 않음)
+    now_kst = datetime.now(KST)
+    today = now_kst.strftime("%Y-%m-%d")
+    state["last_run"] = now_kst.strftime("%m-%d %H:%M KST")  # state.json이 실행마다 갱신되어 '마지막 실행 시각' 확인용
+
     manual = os.environ.get("EVENT_NAME") == "workflow_dispatch"
     if manual or not state.get("started"):
         send("✅ 신호 알림 봇이 시작되었습니다 (테스트 메시지)\n"
@@ -328,6 +335,11 @@ def main():
              f"인터벌: {', '.join(INTERVALS)}\n"
              "롱/숏 신호가 나오면 이 채팅으로 알림이 옵니다.")
         state["started"] = 1
+        state["hb_date"] = today
+
+    elif HEARTBEAT_HOUR_KST is not None and now_kst.hour >= HEARTBEAT_HOUR_KST and state.get("hb_date") != today:
+        send(f"💓 봇 정상 작동 중 (하루 한 번 알림)\n확인 시각: {state['last_run']}")
+        state["hb_date"] = today
 
     try:
         valid = {m["market"] for m in http_get("/market/all", {"isDetails": "false"})}
