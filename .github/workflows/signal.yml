@@ -3,6 +3,14 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      test:
+        description: "텔레그램 테스트 메시지 보내기"
+        type: boolean
+        default: false
+concurrency:
+  group: signal-bot
+  cancel-in-progress: false
 permissions:
   contents: write
 jobs:
@@ -16,7 +24,7 @@ jobs:
       - run: pip install requests
       - run: python signal_bot.py
         env:
-          EVENT_NAME: ${{ github.event_name }}
+          SEND_TEST: ${{ github.event.inputs.test }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       - name: save state
